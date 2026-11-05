@@ -1,0 +1,10 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+tegara_ai.db
+uploads/
+
+.env
+.streamlit/secrets.toml
