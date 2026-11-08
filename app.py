@@ -1,4 +1,4 @@
-
+import time
 import os
 import re
 import sqlite3
@@ -214,23 +214,22 @@ def retrieve_context(question):
 # 7. الاتصال بـ Gemini
 # ==========================================
 
+
 def ask_gemini(question, context):
     if not GEMINI_API_KEY:
         return "مفتاح Gemini API غير مضبوط. يرجى مراجعة إعدادات الموقع."
 
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
-        prompt = f"""
+    prompt = f"""
 أنت Tegara AI، مساعد ذكي مخصص لطلاب كلية التجارة.
 
 تعليمات مهمة:
 1. أجب باللغة العربية الواضحة والبسيطة.
 2. اجعل إجابتك منظمة وسهلة الفهم.
 3. اعتمد على المعلومات الموجودة في قاعدة المعرفة عند توفرها.
-4. لا تخترع معلومات أو تنسب معلومة للمصادر دون دليل.
+4. لا تخترع معلومات.
 5. إذا لم تجد الإجابة في المعلومات المتاحة، وضح ذلك للطالب.
-6. ساعد الطالب في فهم المواد والمفاهيم الدراسية.
 
 المعلومات المتاحة من قاعدة المعرفة:
 {context if context else "لا توجد معلومات مرتبطة بالسؤال في قاعدة المعرفة."}
@@ -239,18 +238,35 @@ def ask_gemini(question, context):
 {question}
 """
 
-        response = client.models.generate_content(
-           model="gemini-3.8-flash",
-            contents=prompt
-        )
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=prompt
+            )
 
-        if response.text:
-            return response.text
+            if response.text:
+                return response.text
 
-        return "لم أتمكن من تكوين إجابة. حاول مرة أخرى."
+            return "لم أتمكن من تكوين إجابة. حاول مرة أخرى."
 
-    except Exception as e:
-        return f"حصل خطأ أثناء الاتصال بخدمة الذكاء الاصطناعي: {e}"
+        except Exception as e:
+            error_text = str(e)
+
+            if ("503" in error_text or "429" in error_text) and attempt < 2:
+                time.sleep(2 ** (attempt + 1))
+                continue
+
+            if "503" in error_text:
+                return "خدمة الذكاء الاصطناعي عليها ضغط حاليًا. انتظر قليلًا وحاول مرة أخرى."
+
+            if "429" in error_text:
+                return "وصلنا إلى حد الاستخدام المسموح حاليًا. حاول مرة أخرى لاحقًا."
+
+            return f"حصل خطأ أثناء الاتصال بخدمة الذكاء الاصطناعي: {e}"
+
+    return "الخدمة مشغولة حاليًا. حاول مرة أخرى بعد قليل."
+
 
 
 # ==========================================
