@@ -24,7 +24,7 @@ UPLOAD_DIR = APP_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 st.set_page_config(
-    page_title="Tegara AI",
+    page_title="Tegara UM AI",
     page_icon="🎓",
     layout="wide"
 )
