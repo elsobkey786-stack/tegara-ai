@@ -1,7 +1,8 @@
-import time
+
 import os
 import re
 import sqlite3
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -29,7 +30,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# قراءة مفاتيح التشغيل من Streamlit Secrets
 try:
     GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
@@ -42,11 +42,12 @@ except Exception:
 
 
 # ==========================================
-# 2. الاتصال بقاعدة البيانات
+# 2. قاعدة البيانات
 # ==========================================
 
 def connect():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=20)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS knowledge (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,12 +59,13 @@ def connect():
             created_at TEXT
         )
     """)
+
     conn.commit()
     return conn
 
 
 # ==========================================
-# 3. استخراج النص من الملفات
+# 3. قراءة الملفات
 # ==========================================
 
 def extract_file(uploaded_file):
@@ -79,6 +81,7 @@ def extract_file(uploaded_file):
 
         elif filename.endswith(".docx"):
             document = Document(uploaded_file)
+
             text = "\n".join(
                 paragraph.text
                 for paragraph in document.paragraphs
@@ -95,8 +98,7 @@ def extract_file(uploaded_file):
 
         return text.strip()
 
-    except Exception as e:
-        st.error(f"حصل خطأ أثناء قراءة الملف: {e}")
+    except Exception:
         return None
 
 
@@ -131,24 +133,27 @@ def split_chunks(text, chunk_size=900, overlap=150):
 
 
 # ==========================================
-# 5. قراءة البيانات من قاعدة المعرفة
+# 5. قراءة قاعدة المعرفة
 # ==========================================
 
 def get_items():
     conn = connect()
 
-    rows = conn.execute("""
-        SELECT id, kind, title, question, answer, content
-        FROM knowledge
-        ORDER BY id DESC
-    """).fetchall()
+    try:
+        rows = conn.execute("""
+            SELECT id, kind, title, question, answer, content
+            FROM knowledge
+            ORDER BY id DESC
+        """).fetchall()
 
-    conn.close()
-    return rows
+        return rows
+
+    finally:
+        conn.close()
 
 
 # ==========================================
-# 6. البحث داخل قاعدة المعرفة
+# 6. البحث عن المعلومات
 # ==========================================
 
 def retrieve_context(question):
@@ -170,8 +175,7 @@ def retrieve_context(question):
         else:
             text = content or ""
 
-        for chunk in split_chunks(text):
-            documents.append(chunk)
+        documents.extend(split_chunks(text))
 
     if not documents:
         return ""
@@ -199,9 +203,7 @@ def retrieve_context(question):
         results = []
 
         for index in best_indices:
-            score = similarities[index]
-
-            if score >= 0.12:
+            if similarities[index] >= 0.12:
                 results.append(documents[index])
 
         return "\n\n".join(results)
@@ -211,62 +213,55 @@ def retrieve_context(question):
 
 
 # ==========================================
-# 7. الاتصال بـ Gemini
+# 7. Gemini AI
 # ==========================================
 
-
 def ask_gemini(question, context):
+
     if not GEMINI_API_KEY:
         return "مفتاح Gemini API غير مضبوط. يرجى مراجعة إعدادات الموقع."
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
 
     prompt = f"""
 أنت Tegara AI، مساعد ذكي مخصص لطلاب كلية التجارة.
 
-تعليمات مهمة:
+تعليماتك:
 1. أجب باللغة العربية الواضحة والبسيطة.
-2. اجعل إجابتك منظمة وسهلة الفهم.
-3. اعتمد على المعلومات الموجودة في قاعدة المعرفة عند توفرها.
-4. لا تخترع معلومات.
+2. اجعل الإجابة منظمة وسهلة الفهم.
+3. استفد من المعلومات الموجودة في قاعدة المعرفة.
+4. لا تخترع معلومات غير مؤكدة.
 5. إذا لم تجد الإجابة في المعلومات المتاحة، وضح ذلك للطالب.
+6. ساعد الطالب على فهم المواد والمفاهيم الدراسية.
 
-المعلومات المتاحة من قاعدة المعرفة:
+المعلومات المتاحة:
 {context if context else "لا توجد معلومات مرتبطة بالسؤال في قاعدة المعرفة."}
 
 سؤال الطالب:
 {question}
 """
 
-    for attempt in range(3):
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt
-            )
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
 
-            if response.text:
-                return response.text
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt
+        )
 
-            return "لم أتمكن من تكوين إجابة. حاول مرة أخرى."
+        if response.text:
+            return response.text
 
-        except Exception as e:
-            error_text = str(e)
+        return "لم أتمكن من تكوين إجابة. حاول مرة أخرى."
 
-            if ("503" in error_text or "429" in error_text) and attempt < 2:
-                time.sleep(2 ** (attempt + 1))
-                continue
+    except Exception as e:
+        error_text = str(e)
 
-            if "503" in error_text:
-                return "خدمة الذكاء الاصطناعي عليها ضغط حاليًا. انتظر قليلًا وحاول مرة أخرى."
+        if "503" in error_text:
+            return "خدمة الذكاء الاصطناعي مشغولة حاليًا بسبب ضغط الاستخدام. حاول مرة أخرى بعد قليل."
 
-            if "429" in error_text:
-                return "وصلنا إلى حد الاستخدام المسموح حاليًا. حاول مرة أخرى لاحقًا."
+        if "429" in error_text:
+            return "وصلنا إلى حد الاستخدام المسموح حاليًا. حاول مرة أخرى لاحقًا."
 
-            return f"حصل خطأ أثناء الاتصال بخدمة الذكاء الاصطناعي: {e}"
-
-    return "الخدمة مشغولة حاليًا. حاول مرة أخرى بعد قليل."
-
+        return f"حصل خطأ أثناء الاتصال بخدمة الذكاء الاصطناعي: {error_text}"
 
 
 # ==========================================
@@ -276,69 +271,123 @@ def ask_gemini(question, context):
 def add_question(question, answer):
     conn = connect()
 
-    conn.execute("""
-        INSERT INTO knowledge
-        (kind, title, question, answer, content, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        "qa",
-        question,
-        question,
-        answer,
-        "",
-        datetime.now().isoformat()
-    ))
+    try:
+        conn.execute("""
+            INSERT INTO knowledge
+            (kind, title, question, answer, content, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            "qa",
+            question,
+            question,
+            answer,
+            "",
+            datetime.now().isoformat()
+        ))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        return True
+
+    finally:
+        conn.close()
 
 
 # ==========================================
-# 9. إضافة ملف إلى قاعدة المعرفة
+# 9. حفظ سؤال وإجابة من لوحة المسؤول
+# ==========================================
+
+def save_qa_callback():
+
+    question = st.session_state.get(
+        "qa_question", ""
+    ).strip()
+
+    answer = st.session_state.get(
+        "qa_answer", ""
+    ).strip()
+
+    if not question or not answer:
+        st.session_state["qa_notice"] = (
+            "من فضلك اكتب السؤال والإجابة أولًا."
+        )
+        st.session_state["qa_notice_type"] = "warning"
+        return
+
+    try:
+        add_question(question, answer)
+
+        # تفريغ الخانات بعد نجاح الحفظ فقط
+        st.session_state["qa_question"] = ""
+        st.session_state["qa_answer"] = ""
+
+        st.session_state["qa_notice"] = (
+            "تم حفظ السؤال والإجابة بنجاح."
+        )
+        st.session_state["qa_notice_type"] = "success"
+
+    except Exception as e:
+        # الاحتفاظ بالنص إذا فشل الحفظ
+        st.session_state["qa_notice"] = (
+            f"لم يتم الحفظ. الخطأ: {e}"
+        )
+        st.session_state["qa_notice_type"] = "error"
+
+
+# ==========================================
+# 10. إضافة ملف
 # ==========================================
 
 def add_file(title, content):
     conn = connect()
 
-    conn.execute("""
-        INSERT INTO knowledge
-        (kind, title, question, answer, content, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        "file",
-        title,
-        "",
-        "",
-        content,
-        datetime.now().isoformat()
-    ))
+    try:
+        conn.execute("""
+            INSERT INTO knowledge
+            (kind, title, question, answer, content, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            "file",
+            title,
+            "",
+            "",
+            content,
+            datetime.now().isoformat()
+        ))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+
+    finally:
+        conn.close()
 
 
 # ==========================================
-# 10. حذف عنصر من قاعدة المعرفة
+# 11. حذف عنصر
 # ==========================================
 
 def delete_item(item_id):
     conn = connect()
 
-    conn.execute(
-        "DELETE FROM knowledge WHERE id = ?",
-        (item_id,)
-    )
+    try:
+        conn.execute(
+            "DELETE FROM knowledge WHERE id = ?",
+            (item_id,)
+        )
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+
+    finally:
+        conn.close()
 
 
 # ==========================================
-# 11. واجهة التطبيق
+# 12. واجهة التطبيق
 # ==========================================
 
 st.title("🎓 Tegara AI")
-st.caption("مساعدك الذكي للتعلم والدراسة في كلية التجارة")
+
+st.caption(
+    "مساعدك الذكي للتعلم والدراسة في كلية التجارة"
+)
 
 page = st.sidebar.radio(
     "القائمة الرئيسية",
@@ -350,7 +399,7 @@ page = st.sidebar.radio(
 
 
 # ==========================================
-# 12. صفحة الطالب
+# 13. صفحة الطالب
 # ==========================================
 
 if page == "💬 المساعد الذكي":
@@ -358,7 +407,7 @@ if page == "💬 المساعد الذكي":
     st.header("اسأل Tegara AI")
 
     st.write(
-        "اكتب سؤالك الدراسي، وسيحاول المساعد "
+        "اكتب سؤالك الدراسي وسيحاول المساعد "
         "تقديم إجابة واضحة ومفيدة."
     )
 
@@ -370,12 +419,16 @@ if page == "💬 المساعد الذكي":
         st.rerun()
 
     for message in st.session_state.chat_history:
+
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    question = st.chat_input("اكتب سؤالك هنا...")
+    question = st.chat_input(
+        "اكتب سؤالك هنا..."
+    )
 
     if question:
+
         st.session_state.chat_history.append({
             "role": "user",
             "content": question
@@ -385,7 +438,8 @@ if page == "💬 المساعد الذكي":
             st.markdown(question)
 
         with st.chat_message("assistant"):
-            with st.spinner("جاري البحث وتجهيز الإجابة..."):
+
+            with st.spinner("جاري تجهيز الإجابة..."):
 
                 context = retrieve_context(question)
                 answer = ask_gemini(question, context)
@@ -399,24 +453,25 @@ if page == "💬 المساعد الذكي":
 
 
 # ==========================================
-# 13. صفحة المسؤول
+# 14. لوحة المسؤول
 # ==========================================
 
 elif page == "🔐 لوحة المسؤول":
 
     st.header("🔐 لوحة إدارة Tegara AI")
 
-    # مهم: لو كلمة المرور غير موجودة، نمنع فتح الإدارة
+    # منع الدخول إذا لم يتم ضبط كلمة المرور
     if not ADMIN_PASSWORD:
         st.error(
             "لوحة المسؤول غير مفعلة. "
-            "يرجى ضبط TEGARA_ADMIN_PASSWORD في إعدادات Secrets."
+            "يرجى ضبط TEGARA_ADMIN_PASSWORD في Secrets."
         )
         st.stop()
 
     if "admin_authenticated" not in st.session_state:
         st.session_state.admin_authenticated = False
 
+    # شاشة تسجيل الدخول
     if not st.session_state.admin_authenticated:
 
         password = st.text_input(
@@ -455,37 +510,43 @@ elif page == "🔐 لوحة المسؤول":
 
         st.subheader("إضافة سؤال وإجابة جديدة")
 
-        with st.form("add_qa_form"):
+        if "qa_notice" in st.session_state:
 
-            new_question = st.text_area(
-                "السؤال"
+            notice = st.session_state["qa_notice"]
+
+            notice_type = st.session_state.get(
+                "qa_notice_type", "success"
             )
 
-            new_answer = st.text_area(
-                "الإجابة"
-            )
+            if notice_type == "success":
+                st.success(notice)
 
-            submitted = st.form_submit_button(
-                "حفظ السؤال والإجابة"
-            )
+            elif notice_type == "warning":
+                st.warning(notice)
 
-            if submitted:
+            else:
+                st.error(notice)
 
-                if new_question.strip() and new_answer.strip():
+        st.text_area(
+            "السؤال",
+            key="qa_question",
+            placeholder="اكتب السؤال هنا..."
+        )
 
-                    add_question(
-                        new_question.strip(),
-                        new_answer.strip()
-                    )
+        st.text_area(
+            "الإجابة",
+            key="qa_answer",
+            placeholder="اكتب الإجابة هنا..."
+        )
 
-                    st.success("تمت إضافة السؤال والإجابة بنجاح.")
-                    st.rerun()
-
-                else:
-                    st.warning("من فضلك اكتب السؤال والإجابة.")
+        st.button(
+            "💾 حفظ السؤال والإجابة",
+            type="primary",
+            on_click=save_qa_callback
+        )
 
     # --------------------------------------
-    # رفع الملفات
+    # رفع ملف
     # --------------------------------------
 
     with tab2:
@@ -494,37 +555,50 @@ elif page == "🔐 لوحة المسؤول":
 
         uploaded_file = st.file_uploader(
             "اختر ملف PDF أو Word",
-            type=["pdf", "docx"]
+            type=["pdf", "docx"],
+            key="knowledge_file"
         )
 
         if uploaded_file:
 
-            st.write("اسم الملف:", uploaded_file.name)
+            st.write(
+                "اسم الملف:",
+                uploaded_file.name
+            )
 
             if st.button("رفع وحفظ الملف"):
 
-                with st.spinner("جاري استخراج النص وحفظه..."):
+                with st.spinner("جاري استخراج النص..."):
 
-                    extracted_text = extract_file(uploaded_file)
+                    extracted_text = extract_file(
+                        uploaded_file
+                    )
 
                     if extracted_text:
 
-                        add_file(
-                            uploaded_file.name,
-                            extracted_text
-                        )
+                        try:
+                            add_file(
+                                uploaded_file.name,
+                                extracted_text
+                            )
 
-                        st.success(
-                            "تم حفظ الملف وإضافته إلى قاعدة المعرفة."
-                        )
+                            st.success(
+                                "تم رفع الملف وحفظ محتواه بنجاح."
+                            )
+
+                        except Exception as e:
+                            st.error(
+                                f"لم يتم حفظ الملف: {e}"
+                            )
 
                     else:
                         st.error(
-                            "لم يتم العثور على نص قابل للاستخراج في الملف."
+                            "لم يتم العثور على نص قابل للاستخراج. "
+                            "تأكد أن الملف يحتوي على نص وليس صورًا فقط."
                         )
 
     # --------------------------------------
-    # إدارة قاعدة المعرفة
+    # إدارة المعرفة
     # --------------------------------------
 
     with tab3:
@@ -534,11 +608,16 @@ elif page == "🔐 لوحة المسؤول":
         items = get_items()
 
         if not items:
-            st.info("لا توجد بيانات محفوظة حتى الآن.")
+
+            st.info(
+                "لا توجد بيانات محفوظة حتى الآن."
+            )
 
         else:
 
-            st.write(f"عدد العناصر المحفوظة: {len(items)}")
+            st.write(
+                f"عدد العناصر المحفوظة: {len(items)}"
+            )
 
             for item in items:
 
@@ -559,16 +638,23 @@ elif page == "🔐 لوحة المسؤول":
                     else:
 
                         st.markdown("**محتوى الملف:**")
+
                         st.write(
                             (content or "")[:1500]
                         )
 
                     if st.button(
-                        f"حذف العنصر رقم {item_id}",
+                        f"🗑️ حذف العنصر رقم {item_id}",
                         key=f"delete_{item_id}"
                     ):
 
-                        delete_item(item_id)
+                        try:
+                            delete_item(item_id)
 
-                        st.success("تم حذف العنصر.")
-                        st.rerun()
+                            st.success("تم حذف العنصر.")
+                            st.rerun()
+
+                        except Exception as e:
+                            st.error(
+                                f"لم يتم الحذف: {e}"
+                            )
