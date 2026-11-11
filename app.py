@@ -1,13 +1,12 @@
-from openai import OpenAI
+
 import os
 import re
 import sqlite3
-import time
 from pathlib import Path
 from datetime import datetime
 
 import streamlit as st
-from google import genai
+from openai import OpenAI
 from pypdf import PdfReader
 from docx import Document
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -30,10 +29,11 @@ st.set_page_config(
     layout="wide"
 )
 
+# قراءة مفاتيح التشغيل من Streamlit Secrets
 try:
-    GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+    XAI_API_KEY = st.secrets.get("XAI_API_KEY", "")
 except Exception:
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 
 try:
     ADMIN_PASSWORD = st.secrets.get("TEGARA_ADMIN_PASSWORD", "")
@@ -42,7 +42,7 @@ except Exception:
 
 
 # ==========================================
-# 2. قاعدة البيانات
+# 2. الاتصال بقاعدة البيانات
 # ==========================================
 
 def connect():
@@ -65,7 +65,7 @@ def connect():
 
 
 # ==========================================
-# 3. قراءة الملفات
+# 3. استخراج النص من الملفات
 # ==========================================
 
 def extract_file(uploaded_file):
@@ -74,6 +74,7 @@ def extract_file(uploaded_file):
     try:
         if filename.endswith(".pdf"):
             reader = PdfReader(uploaded_file)
+
             text = "\n".join(
                 page.extract_text() or ""
                 for page in reader.pages
@@ -153,7 +154,7 @@ def get_items():
 
 
 # ==========================================
-# 6. البحث عن المعلومات
+# 6. البحث في قاعدة المعرفة
 # ==========================================
 
 def retrieve_context(question):
@@ -213,26 +214,30 @@ def retrieve_context(question):
 
 
 # ==========================================
-# 7. Gemini AI
+# 7. الاتصال بـ Grok AI
 # ==========================================
 
-def ask_gemini(question, context):
+def ask_grok(question, context):
 
-    if not GEMINI_API_KEY:
-        return "مفتاح Gemini API غير مضبوط. يرجى مراجعة إعدادات الموقع."
+    if not XAI_API_KEY:
+        return (
+            "مفتاح Grok API غير مضبوط. "
+            "يرجى إضافة XAI_API_KEY في إعدادات Secrets."
+        )
 
     prompt = f"""
 أنت Tegara AI، مساعد ذكي مخصص لطلاب كلية التجارة.
 
-تعليماتك:
+تعليمات مهمة:
 1. أجب باللغة العربية الواضحة والبسيطة.
-2. اجعل الإجابة منظمة وسهلة الفهم.
-3. استفد من المعلومات الموجودة في قاعدة المعرفة.
-4. لا تخترع معلومات غير مؤكدة.
-5. إذا لم تجد الإجابة في المعلومات المتاحة، وضح ذلك للطالب.
-6. ساعد الطالب على فهم المواد والمفاهيم الدراسية.
+2. اجعل إجابتك منظمة وسهلة الفهم.
+3. استخدم أمثلة عملية عند الحاجة.
+4. استفد من المعلومات الموجودة في قاعدة المعرفة.
+5. لا تخترع معلومات أو تنسب معلومة للمصادر دون دليل.
+6. إذا لم تجد الإجابة في المعلومات المتاحة، وضح ذلك للطالب.
+7. ساعد الطالب على فهم المواد والمفاهيم الدراسية.
 
-المعلومات المتاحة:
+المعلومات المتاحة من قاعدة المعرفة:
 {context if context else "لا توجد معلومات مرتبطة بالسؤال في قاعدة المعرفة."}
 
 سؤال الطالب:
@@ -240,28 +245,63 @@ def ask_gemini(question, context):
 """
 
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt
+        client = OpenAI(
+            api_key=XAI_API_KEY,
+            base_url="https://api.x.ai/v1",
+            timeout=45.0,
+            max_retries=1
         )
 
-        if response.text:
-            return response.text
+        response = client.chat.completions.create(
+            model="grok-4.1-fast",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "أنت Tegara AI، مساعد أكاديمي متخصص "
+                        "في مساعدة طلاب كلية التجارة."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.4
+        )
+
+        answer = response.choices[0].message.content
+
+        if answer:
+            return answer
 
         return "لم أتمكن من تكوين إجابة. حاول مرة أخرى."
 
     except Exception as e:
         error_text = str(e)
 
-        if "503" in error_text:
-            return "خدمة الذكاء الاصطناعي مشغولة حاليًا بسبب ضغط الاستخدام. حاول مرة أخرى بعد قليل."
+        if "401" in error_text:
+            return "مفتاح Grok API غير صحيح أو غير مفعل."
+
+        if "403" in error_text:
+            return "حساب Grok API لا يملك صلاحية استخدام هذا الموديل."
+
+        if "404" in error_text:
+            return (
+                "اسم الموديل غير متاح لحسابك. "
+                "راجع أسماء الموديلات المتاحة في xAI Console."
+            )
 
         if "429" in error_text:
-            return "وصلنا إلى حد الاستخدام المسموح حاليًا. حاول مرة أخرى لاحقًا."
+            return (
+                "وصلنا إلى حد الاستخدام أو الطلبات المسموح به. "
+                "حاول مرة أخرى لاحقًا."
+            )
 
-        return f"حصل خطأ أثناء الاتصال بخدمة الذكاء الاصطناعي: {error_text}"
+        if "timeout" in error_text.lower():
+            return "استغرق الاتصال وقتًا طويلًا. حاول مرة أخرى."
+
+        return f"حصل خطأ أثناء الاتصال بـ Grok: {error_text}"
 
 
 # ==========================================
@@ -310,31 +350,33 @@ def save_qa_callback():
         st.session_state["qa_notice"] = (
             "من فضلك اكتب السؤال والإجابة أولًا."
         )
+
         st.session_state["qa_notice_type"] = "warning"
         return
 
     try:
         add_question(question, answer)
 
-        # تفريغ الخانات بعد نجاح الحفظ فقط
+        # تفريغ الخانات بعد نجاح الحفظ
         st.session_state["qa_question"] = ""
         st.session_state["qa_answer"] = ""
 
         st.session_state["qa_notice"] = (
             "تم حفظ السؤال والإجابة بنجاح."
         )
+
         st.session_state["qa_notice_type"] = "success"
 
     except Exception as e:
-        # الاحتفاظ بالنص إذا فشل الحفظ
         st.session_state["qa_notice"] = (
             f"لم يتم الحفظ. الخطأ: {e}"
         )
+
         st.session_state["qa_notice_type"] = "error"
 
 
 # ==========================================
-# 10. إضافة ملف
+# 10. إضافة ملف إلى قاعدة المعرفة
 # ==========================================
 
 def add_file(title, content):
@@ -361,7 +403,7 @@ def add_file(title, content):
 
 
 # ==========================================
-# 11. حذف عنصر
+# 11. حذف عنصر من قاعدة المعرفة
 # ==========================================
 
 def delete_item(item_id):
@@ -442,7 +484,7 @@ if page == "💬 المساعد الذكي":
             with st.spinner("جاري تجهيز الإجابة..."):
 
                 context = retrieve_context(question)
-                answer = ask_gemini(question, context)
+                answer = ask_grok(question, context)
 
                 st.markdown(answer)
 
@@ -471,7 +513,7 @@ elif page == "🔐 لوحة المسؤول":
     if "admin_authenticated" not in st.session_state:
         st.session_state.admin_authenticated = False
 
-    # شاشة تسجيل الدخول
+    # تسجيل الدخول
     if not st.session_state.admin_authenticated:
 
         password = st.text_input(
@@ -485,6 +527,7 @@ elif page == "🔐 لوحة المسؤول":
             if password and password == ADMIN_PASSWORD:
                 st.session_state.admin_authenticated = True
                 st.rerun()
+
             else:
                 st.error("كلمة المرور غير صحيحة.")
 
@@ -546,7 +589,7 @@ elif page == "🔐 لوحة المسؤول":
         )
 
     # --------------------------------------
-    # رفع ملف
+    # رفع الملفات
     # --------------------------------------
 
     with tab2:
@@ -598,7 +641,7 @@ elif page == "🔐 لوحة المسؤول":
                         )
 
     # --------------------------------------
-    # إدارة المعرفة
+    # إدارة قاعدة المعرفة
     # --------------------------------------
 
     with tab3:
