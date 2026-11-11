@@ -301,7 +301,17 @@ def ask_grok(question, context):
         if "timeout" in error_text.lower():
             return "استغرق الاتصال وقتًا طويلًا. حاول مرة أخرى."
 
-        return f"حصل خطأ أثناء الاتصال بـ Grok: {error_text}"
+                status_code = getattr(e, "status_code", "غير معروف")
+        error_body = getattr(e, "body", None)
+
+        return f"""
+خطأ أثناء الاتصال بـ Grok
+
+كود الخطأ: {status_code}
+
+تفاصيل الخطأ:
+{error_body if error_body else str(e)}
+"""
 
 
 # ==========================================
