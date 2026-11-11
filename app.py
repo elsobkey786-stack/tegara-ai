@@ -248,9 +248,35 @@ def ask_gemini(question, context):
             api_key=GEMINI_API_KEY
         )
 
-        response = client.models.generate_content(
-           model="gemini-2.5-flash",
-            contents=prompt
+        # جلب الموديلات المتاحة لمفتاح API
+available_models = []
+
+for m in client.models.list():
+    actions = m.supported_actions or []
+    if "generateContent" in actions:
+        available_models.append(m.name)
+
+if not available_models:
+    return "مفتاح Gemini لم يُرجع أي موديل يدعم توليد النصوص."
+
+# اختيار موديل Flash متاح تلقائيًا
+flash_models = [
+    m for m in available_models
+    if "flash" in m.lower()
+    and "image" not in m.lower()
+]
+
+if flash_models:
+    selected_model = flash_models[0]
+else:
+    selected_model = available_models[0]
+
+response = client.models.generate_content(
+    model=selected_model,
+    contents=prompt
+)
+
+return response.text or "Gemini لم يُرجع إجابة."
         )
 
         answer = response.text
