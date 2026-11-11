@@ -10,6 +10,7 @@ import streamlit as st
 from google import genai
 from pypdf import PdfReader
 from docx import Document
+
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -18,20 +19,18 @@ from sklearn.metrics.pairwise import cosine_similarity
 # 1. إعدادات التطبيق
 # ==========================================
 
-APP_DIR = Path(__file__).parent
-DB_PATH = APP_DIR / "tegara_ai.db"
-UPLOAD_DIR = APP_DIR / "uploads"
-
-UPLOAD_DIR.mkdir(exist_ok=True)
-
 st.set_page_config(
     page_title="Tegara AI",
     page_icon="🎓",
     layout="wide"
 )
 
+APP_DIR = Path(__file__).parent
+DB_PATH = APP_DIR / "tegara_ai.db"
+UPLOAD_DIR = APP_DIR / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
+
 MODEL_NAME = "gemini-3.8-flash"
-TIME_ZONE = ZoneInfo("Africa/Cairo")
 
 try:
     GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -45,7 +44,7 @@ except Exception:
 
 
 # ==========================================
-# 2. الاتصال بقاعدة البيانات
+# 2. قاعدة البيانات
 # ==========================================
 
 def connect():
@@ -67,108 +66,131 @@ def connect():
     return conn
 
 
-def refresh_knowledge_cache():
-    """تحديث الذاكرة المؤقتة بعد تغيير البيانات."""
-    get_items.clear()
-    build_search_index.clear()
+def get_items():
+    conn = connect()
+
+    try:
+        return conn.execute("""
+            SELECT id, kind, title, question, answer, content
+            FROM knowledge
+            ORDER BY id DESC
+        """).fetchall()
+    finally:
+        conn.close()
+
+
+def add_question(question, answer):
+    conn = connect()
+
+    try:
+        conn.execute("""
+            INSERT INTO knowledge
+            (kind, title, question, answer, content, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            "qa",
+            question,
+            question,
+            answer,
+            "",
+            datetime.now().isoformat()
+        ))
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    refresh_knowledge_cache()
+
+
+def add_file(title, content):
+    conn = connect()
+
+    try:
+        conn.execute("""
+            INSERT INTO knowledge
+            (kind, title, question, answer, content, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            "file",
+            title,
+            "",
+            "",
+            content,
+            datetime.now().isoformat()
+        ))
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    refresh_knowledge_cache()
+
+
+def delete_item(item_id):
+    conn = connect()
+
+    try:
+        conn.execute(
+            "DELETE FROM knowledge WHERE id = ?",
+            (item_id,)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    refresh_knowledge_cache()
 
 
 # ==========================================
-# 3. الوقت والتاريخ
+# 3. استخراج النص من الملفات
 # ==========================================
 
-def get_current_time():
-    now = datetime.now(TIME_ZONE)
+def extract_file(uploaded_file):
+    filename = uploaded_file.name.lower()
 
-    return (
-        f"الساعة الآن {now.strftime('%I:%M %p')} "
-        f"بتوقيت مصر."
-    )
+    try:
+        if filename.endswith(".pdf"):
+            reader = PdfReader(uploaded_file)
 
+            text = "\n".join(
+                page.extract_text() or ""
+                for page in reader.pages
+            )
 
-def get_current_date():
-    now = datetime.now(TIME_ZONE)
+        elif filename.endswith(".docx"):
+            document = Document(uploaded_file)
 
-    weekdays = [
-        "الاثنين", "الثلاثاء", "الأربعاء",
-        "الخميس", "الجمعة", "السبت", "الأحد"
-    ]
+            parts = [
+                paragraph.text
+                for paragraph in document.paragraphs
+                if paragraph.text.strip()
+            ]
 
-    months = [
-        "يناير", "فبراير", "مارس", "أبريل",
-        "مايو", "يونيو", "يوليو", "أغسطس",
-        "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"
-    ]
+            for table in document.tables:
+                for row in table.rows:
+                    parts.append(
+                        " | ".join(cell.text for cell in row.cells)
+                    )
 
-    weekday = weekdays[now.weekday()]
-    month = months[now.month - 1]
+            text = "\n".join(parts)
 
-    return (
-        f"اليوم {weekday}، "
-        f"{now.day} {month} {now.year}."
-    )
+        else:
+            return ""
 
+        return text.strip()
 
-def get_time_or_date_answer(question):
-    """إجابة فورية عن الوقت والتاريخ دون استدعاء Gemini."""
-
-    q = normalize_text(question)
-
-    time_words = [
-        "الساعه كام", "الوقت كام", "كم الساعه",
-        "ما الوقت", "الوقت الحالي", "الساعه الحاليه",
-        "قول لي الساعه", "الساعة كام"
-    ]
-
-    date_words = [
-        "النهارده كام", "تاريخ اليوم", "ما تاريخ اليوم",
-        "النهارده ايه", "اليوم كام", "تاريخ النهارده",
-        "ما هو تاريخ اليوم"
-    ]
-
-    asks_time = any(word in q for word in time_words)
-    asks_date = any(word in q for word in date_words)
-
-    if asks_time and asks_date:
-        return get_current_date() + "\n" + get_current_time()
-
-    if asks_time:
-        return get_current_time()
-
-    if asks_date:
-        return get_current_date()
-
-    return None
+    except Exception:
+        return ""
 
 
 # ==========================================
-# 4. تنظيف النصوص
+# 4. تجهيز النصوص
 # ==========================================
-
-def normalize_text(text):
-    text = str(text or "").strip().lower()
-
-    replacements = {
-        "أ": "ا",
-        "إ": "ا",
-        "آ": "ا",
-        "ى": "ي",
-        "ة": "ه",
-        "ؤ": "و",
-        "ئ": "ي"
-    }
-
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    text = re.sub(r"[ًٌٍَُِّْـ]", "", text)
-    text = re.sub(r"\s+", " ", text)
-
-    return text
-
 
 def clean_text(text):
-    text = re.sub(r"\s+", " ", text or "")
+    text = str(text or "")
+    text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
@@ -194,100 +216,76 @@ def split_chunks(text, chunk_size=900, overlap=120):
 
 
 # ==========================================
-# 5. قراءة قاعدة المعرفة بسرعة
+# 5. البحث السريع في قاعدة المعرفة
 # ==========================================
 
-@st.cache_data(ttl=30, show_spinner=False)
-def get_items():
-    conn = connect()
-
-    try:
-        rows = conn.execute("""
-            SELECT id, kind, title, question, answer, content
-            FROM knowledge
-            ORDER BY id DESC
-        """).fetchall()
-
-        return rows
-
-    finally:
-        conn.close()
+@st.cache_data(ttl=30)
+def get_knowledge_data():
+    return get_items()
 
 
-# ==========================================
-# 6. تجهيز محرك البحث مرة واحدة
-# ==========================================
-
-@st.cache_resource(show_spinner=False)
-def build_search_index(items):
-
-    documents = []
-
-    for item in items:
-        item_id, kind, title, question, answer, content = item
-
-        if kind == "qa":
-            text = (
-                f"عنوان السؤال: {title or ''}. "
-                f"السؤال: {question or ''}. "
-                f"الإجابة: {answer or ''}."
-            )
-
-            documents.append(clean_text(text))
-
-        else:
-            file_chunks = split_chunks(content or "")
-
-            for chunk in file_chunks:
-                documents.append(
-                    clean_text(f"{title or ''}. {chunk}")
-                )
-
-    documents = [doc for doc in documents if doc]
-
+@st.cache_resource
+def build_search_index(documents):
     if not documents:
         return None, None
 
-    try:
-        vectorizer = TfidfVectorizer(
-            analyzer="char",
-            ngram_range=(2, 4),
-            max_features=30000,
-            sublinear_tf=True
-        )
+    vectorizer = TfidfVectorizer(
+        analyzer="char",
+        ngram_range=(2, 4),
+        max_features=50000
+    )
 
-        matrix = vectorizer.fit_transform(documents)
+    matrix = vectorizer.fit_transform(documents)
 
-        return vectorizer, (matrix, documents)
-
-    except Exception:
-        return None, None
+    return vectorizer, matrix
 
 
-# ==========================================
-# 7. البحث السريع في البيانات
-# ==========================================
+def refresh_knowledge_cache():
+    get_knowledge_data.clear()
+    build_search_index.clear()
+
 
 def retrieve_context(question):
-
-    items = get_items()
+    items = get_knowledge_data()
 
     if not items:
         return ""
 
-    vectorizer, index_data = build_search_index(items)
+    documents = []
 
-    if vectorizer is None or index_data is None:
+    for item in items:
+        item_id, kind, title, q, answer, content = item
+
+        if kind == "qa":
+            text = (
+                f"عنوان السؤال: {title or ''}\n"
+                f"السؤال: {q or ''}\n"
+                f"الإجابة: {answer or ''}"
+            )
+        else:
+            text = (
+                f"اسم الملف: {title or ''}\n"
+                f"المحتوى: {content or ''}"
+            )
+
+        documents.extend(split_chunks(text))
+
+    if not documents:
         return ""
 
-    matrix, documents = index_data
-
     try:
+        vectorizer, document_matrix = build_search_index(
+            tuple(documents)
+        )
+
+        if vectorizer is None:
+            return ""
+
         question_vector = vectorizer.transform([question])
 
         similarities = cosine_similarity(
             question_vector,
-            matrix
+            document_matrix
         ).flatten()
 
         best_indices = similarities.argsort()[::-1][:3]
@@ -295,9 +293,7 @@ def retrieve_context(question):
         results = []
 
         for index in best_indices:
-            score = similarities[index]
-
-            if score >= 0.10:
+            if similarities[index] >= 0.10:
                 results.append(documents[index])
 
         return "\n\n".join(results)
@@ -307,56 +303,59 @@ def retrieve_context(question):
 
 
 # ==========================================
-# 8. ردود فورية للتحيات والكلمات البسيطة
+# 6. الوقت والتاريخ في مصر
 # ==========================================
 
-def get_quick_answer(question):
+def get_egypt_time():
+    now = datetime.now(ZoneInfo("Africa/Cairo"))
 
-    q = normalize_text(question)
+    return (
+        f"الوقت الآن في مصر: {now.strftime('%I:%M %p')}\n"
+        f"التاريخ اليوم: {now.strftime('%Y-%m-%d')}\n"
+        f"اليوم: {now.strftime('%A')}"
+    )
 
-    greetings = [
-        "السلام عليكم",
-        "سلام عليكم",
-        "صباح الخير",
-        "مساء الخير",
-        "اهلا",
-        "اهلا بيك",
-        "مرحبا",
-        "هاي",
-        "hello",
-        "hi"
+
+def get_time_answer(question):
+    q = clean_text(question).lower()
+
+    time_words = [
+        "الساعة كام",
+        "الساعه كام",
+        "الوقت كام",
+        "كم الساعة",
+        "كم الساعه",
+        "ما الوقت",
+        "الوقت الحالي",
+        "الساعة الآن",
+        "الساعه الان"
     ]
 
-    thanks = [
-        "شكرا",
-        "شكرا ليك",
-        "متشكر",
-        "تسلم",
-        "جزاك الله خيرا"
+    date_words = [
+        "تاريخ اليوم",
+        "النهارده كام",
+        "النهارده ايه",
+        "النهاردة كام",
+        "تاريخ النهارده",
+        "ما تاريخ اليوم"
     ]
 
-    if q in greetings:
-        return (
-            "أهلًا بيك في Tegara AI 🎓\n\n"
-            "أنا مساعدك الذكي لطلاب كلية التجارة. "
-            "اسألني عن الدراسة أو المواد أو المعلومات "
-            "الموجودة في قاعدة معرفة الكلية."
-        )
+    if any(word in q for word in time_words):
+        now = datetime.now(ZoneInfo("Africa/Cairo"))
+        return f"الساعة الآن في مصر هي {now.strftime('%I:%M %p')}."
 
-    if q in thanks:
-        return "العفو، تحت أمرك دائمًا! 🌷"
-
-    if q in ["انت مين", "من انت", "اسمك ايه"]:
+    if any(word in q for word in date_words):
+        now = datetime.now(ZoneInfo("Africa/Cairo"))
         return (
-            "أنا Tegara AI، مساعد ذكي مخصص لمساعدة "
-            "طلاب كلية التجارة."
+            f"تاريخ اليوم هو {now.strftime('%Y-%m-%d')} "
+            f"وهو يوم {now.strftime('%A')}."
         )
 
     return None
 
 
 # ==========================================
-# 9. الاتصال بـ Gemini
+# 7. الاتصال بـ Gemini
 # ==========================================
 
 @st.cache_resource
@@ -365,168 +364,92 @@ def get_gemini_client(api_key):
 
 
 def ask_gemini(question, context):
-
     if not GEMINI_API_KEY:
-        yield "مفتاح Gemini API غير مضبوط في إعدادات Secrets."
-        return
+        return (
+            "مفتاح Gemini API غير موجود.\n"
+            "تأكد من إضافة GEMINI_API_KEY في إعدادات Secrets."
+        )
+
+    time_answer = get_time_answer(question)
+
+    if time_answer:
+        return time_answer
 
     prompt = f"""
-أنت Tegara AI، مساعد ذكي متخصص في مساعدة طلاب كلية التجارة.
+أنت Tegara AI، مساعد ذكي لطلاب كلية التجارة بجامعة المنصورة.
 
-قواعد الإجابة:
-1. أجب باللغة العربية الواضحة والبسيطة.
-2. اجعل الإجابة مباشرة ومنظمة دون إطالة غير ضرورية.
-3. لا تبدأ في تحليل طويل أو تفكير مطول.
-4. استخدم المعلومات المتاحة من قاعدة المعرفة أولًا.
-5. لا تخترع معلومات عن كلية التجارة أو الجامعة.
-6. إذا لم تكن الإجابة موجودة في المعلومات المتاحة،
-   وضح للطالب أن قاعدة المعرفة لا تحتوي على معلومة مؤكدة.
-7. يمكنك شرح المفاهيم الدراسية العامة، لكن لا تنسبها
-   إلى الكلية أو الجامعة دون مصدر.
-8. إذا كان السؤال بسيطًا، أجب باختصار.
-9. لا تكرر السؤال في بداية الإجابة.
+مهمتك:
+- مساعدة الطلاب في الدراسة وفهم المواد.
+- الإجابة باللغة العربية الواضحة والبسيطة.
+- فهم السؤال حتى لو الطالب كتبه بصياغة مختلفة.
+- تنظيم الإجابة واستخدام الأمثلة عند الحاجة.
+- عدم اختراع معلومات تخص الجامعة أو الكلية أو اللوائح.
+- إذا كان السؤال عن معلومة إدارية خاصة بالكلية وغير موجودة في السياق،
+  وضح للطالب أن المعلومة غير متاحة في قاعدة البيانات.
 
-المعلومات المسترجعة من قاعدة المعرفة:
-{context[:3500] if context else "لا توجد معلومات مرتبطة بالسؤال في قاعدة المعرفة."}
+بالنسبة للأسئلة التعليمية العامة:
+يمكنك شرح المفاهيم العلمية والدراسية بشكل صحيح ومبسط،
+حتى لو لم تكن موجودة في قاعدة المعرفة.
+
+معلومات كلية التجارة المعتمدة الموجودة في قاعدة البيانات:
+{context if context else "لا توجد معلومات مرتبطة بالسؤال في قاعدة البيانات."}
 
 سؤال الطالب:
 {question}
 
-اكتب الإجابة الآن بشكل واضح ومختصر.
+أجب مباشرة وباختصار مفيد.
 """
 
     try:
         client = get_gemini_client(GEMINI_API_KEY)
 
-        stream = client.interactions.create(
+        response = client.interactions.create(
             model=MODEL_NAME,
-            input=prompt,
-            stream=True
+            input=prompt
         )
 
-        received_text = False
+        answer = getattr(response, "output_text", None)
 
-        for event in stream:
+        if answer and answer.strip():
+            return answer.strip()
 
-            if getattr(event, "event_type", "") == "step.delta":
-
-                delta = getattr(event, "delta", None)
-
-                if getattr(delta, "type", None) == "text":
-
-                    chunk = getattr(delta, "text", "")
-
-                    if chunk:
-                        received_text = True
-                        yield chunk
-
-        if not received_text:
-            yield "لم يتمكن المساعد من تكوين إجابة. حاول مرة أخرى."
+        return "لم يصلني رد نصي من Gemini. حاول مرة أخرى."
 
     except Exception as e:
+        error = str(e)
 
-        error_text = str(e)
+        if "401" in error or "API_KEY_INVALID" in error:
+            return "مفتاح Gemini غير صحيح أو غير صالح."
 
-        if "401" in error_text:
-            yield "مفتاح Gemini API غير صحيح."
+        if "403" in error:
+            return "مفتاح Gemini لا يملك صلاحية استخدام الخدمة."
 
-        elif "403" in error_text:
-            yield "مفتاح API لا يملك صلاحية استخدام الخدمة."
-
-        elif "404" in error_text:
-            yield "الموديل غير متاح. راجع اسم الموديل وإعدادات API."
-
-        elif "429" in error_text:
-            yield "وصلنا إلى حد الاستخدام. حاول مرة أخرى بعد قليل."
-
-        elif "503" in error_text:
-            yield "خدمة Gemini مشغولة حاليًا. حاول بعد قليل."
-
-        elif "timeout" in error_text.lower():
-            yield "الاتصال استغرق وقتًا طويلًا. حاول مرة أخرى."
-
-        else:
-            yield f"حدث خطأ أثناء الاتصال: {error_text}"
-
-
-# ==========================================
-# 10. استخراج النص من الملفات
-# ==========================================
-
-def extract_file(uploaded_file):
-
-    filename = uploaded_file.name.lower()
-
-    try:
-        if filename.endswith(".pdf"):
-
-            reader = PdfReader(uploaded_file)
-
-            text = "\n".join(
-                page.extract_text() or ""
-                for page in reader.pages
+        if "404" in error:
+            return (
+                "الموديل المطلوب غير متاح لحسابك. "
+                "راجع اسم الموديل وإمكانية استخدامه."
             )
 
-        elif filename.endswith(".docx"):
-
-            document = Document(uploaded_file)
-
-            text = "\n".join(
-                paragraph.text
-                for paragraph in document.paragraphs
+        if "429" in error:
+            return (
+                "طلبات Gemini كثيرة حاليًا أو وصلت إلى حد الاستخدام. "
+                "انتظر قليلًا ثم حاول مرة أخرى."
             )
 
-            for table in document.tables:
-                for row in table.rows:
-                    text += "\n" + " | ".join(
-                        cell.text for cell in row.cells
-                    )
+        if "503" in error:
+            return (
+                "خدمة Gemini مشغولة حاليًا. "
+                "حاول مرة أخرى بعد قليل."
+            )
 
-        else:
-            return None
-
-        return text.strip()
-
-    except Exception:
-        return None
+        return f"حدث خطأ أثناء الاتصال بـ Gemini:\n\n{error}"
 
 
 # ==========================================
-# 11. إضافة سؤال وإجابة
-# ==========================================
-
-def add_question(question, answer):
-
-    conn = connect()
-
-    try:
-        conn.execute("""
-            INSERT INTO knowledge
-            (kind, title, question, answer, content, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            "qa",
-            question,
-            question,
-            answer,
-            "",
-            datetime.now(TIME_ZONE).isoformat()
-        ))
-
-        conn.commit()
-
-    finally:
-        conn.close()
-
-    refresh_knowledge_cache()
-
-
-# ==========================================
-# 12. حفظ سؤال وإجابة من لوحة المسؤول
+# 8. حفظ السؤال والإجابة من لوحة المسؤول
 # ==========================================
 
 def save_qa_callback():
-
     question = st.session_state.get(
         "qa_question", ""
     ).strip()
@@ -536,11 +459,9 @@ def save_qa_callback():
     ).strip()
 
     if not question or not answer:
-
         st.session_state["qa_notice"] = (
             "من فضلك اكتب السؤال والإجابة أولًا."
         )
-
         st.session_state["qa_notice_type"] = "warning"
         return
 
@@ -553,81 +474,28 @@ def save_qa_callback():
         st.session_state["qa_notice"] = (
             "تم حفظ السؤال والإجابة بنجاح."
         )
-
         st.session_state["qa_notice_type"] = "success"
 
     except Exception as e:
-
         st.session_state["qa_notice"] = (
-            f"لم يتم الحفظ. الخطأ: {e}"
+            f"لم يتم الحفظ: {e}"
         )
-
         st.session_state["qa_notice_type"] = "error"
 
 
 # ==========================================
-# 13. إضافة ملف إلى قاعدة المعرفة
-# ==========================================
-
-def add_file(title, content):
-
-    conn = connect()
-
-    try:
-        conn.execute("""
-            INSERT INTO knowledge
-            (kind, title, question, answer, content, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            "file",
-            title,
-            "",
-            "",
-            content,
-            datetime.now(TIME_ZONE).isoformat()
-        ))
-
-        conn.commit()
-
-    finally:
-        conn.close()
-
-    refresh_knowledge_cache()
-
-
-# ==========================================
-# 14. حذف عنصر من قاعدة المعرفة
-# ==========================================
-
-def delete_item(item_id):
-
-    conn = connect()
-
-    try:
-        conn.execute(
-            "DELETE FROM knowledge WHERE id = ?",
-            (item_id,)
-        )
-
-        conn.commit()
-
-    finally:
-        conn.close()
-
-    refresh_knowledge_cache()
-
-
-# ==========================================
-# 15. واجهة التطبيق
+# 9. واجهة التطبيق
 # ==========================================
 
 connect()
 
 st.title("🎓 Tegara AI")
-
 st.caption(
     "مساعدك الذكي للتعلم والدراسة في كلية التجارة"
 )
+
+st.sidebar.title("Tegara AI")
+st.sidebar.caption("كلية التجارة - جامعة المنصورة")
 
 page = st.sidebar.radio(
     "القائمة الرئيسية",
@@ -639,7 +507,7 @@ page = st.sidebar.radio(
 
 
 # ==========================================
-# 16. صفحة الطالب
+# 10. صفحة الطالب
 # ==========================================
 
 if page == "💬 المساعد الذكي":
@@ -651,22 +519,28 @@ if page == "💬 المساعد الذكي":
         "تقديم إجابة واضحة ومفيدة."
     )
 
+    now = datetime.now(ZoneInfo("Africa/Cairo"))
+
+    st.caption(
+        f"🕒 {now.strftime('%I:%M %p')} | "
+        f"📅 {now.strftime('%Y-%m-%d')}"
+    )
+
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-    if st.button("🗑️ مسح المحادثة"):
+    col1, col2 = st.columns([1, 5])
 
-        st.session_state.chat_history = []
-        st.rerun()
+    with col1:
+        if st.button("🗑️ مسح المحادثة"):
+            st.session_state.chat_history = []
+            st.rerun()
 
     for message in st.session_state.chat_history:
-
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    question = st.chat_input(
-        "اكتب سؤالك هنا..."
-    )
+    question = st.chat_input("اكتب سؤالك هنا...")
 
     if question:
 
@@ -680,23 +554,16 @@ if page == "💬 المساعد الذكي":
 
         with st.chat_message("assistant"):
 
-            # أولًا: فحص الوقت والتاريخ
-            answer = get_time_or_date_answer(question)
+            with st.spinner("جاري تجهيز الإجابة..."):
 
-            # ثانيًا: فحص التحيات والأسئلة البسيطة
-            if answer is None:
-                answer = get_quick_answer(question)
+                try:
+                    context = retrieve_context(question)
+                    answer = ask_gemini(question, context)
 
-            # ثالثًا: البحث في قاعدة المعرفة ثم Gemini
-            if answer is not None:
+                except Exception as e:
+                    answer = f"حدث خطأ داخل التطبيق:\n\n{e}"
+
                 st.markdown(answer)
-
-            else:
-                context = retrieve_context(question)
-
-                answer = st.write_stream(
-                    ask_gemini(question, context)
-                )
 
         st.session_state.chat_history.append({
             "role": "assistant",
@@ -705,7 +572,7 @@ if page == "💬 المساعد الذكي":
 
 
 # ==========================================
-# 17. لوحة المسؤول
+# 11. لوحة المسؤول
 # ==========================================
 
 elif page == "🔐 لوحة المسؤول":
@@ -715,14 +582,13 @@ elif page == "🔐 لوحة المسؤول":
     if not ADMIN_PASSWORD:
         st.error(
             "لوحة المسؤول غير مفعلة. "
-            "يرجى ضبط TEGARA_ADMIN_PASSWORD في Secrets."
+            "أضف TEGARA_ADMIN_PASSWORD في Secrets."
         )
         st.stop()
 
     if "admin_authenticated" not in st.session_state:
         st.session_state.admin_authenticated = False
 
-    # تسجيل الدخول
     if not st.session_state.admin_authenticated:
 
         password = st.text_input(
@@ -733,10 +599,9 @@ elif page == "🔐 لوحة المسؤول":
 
         if st.button("دخول", type="primary"):
 
-            if password and password == ADMIN_PASSWORD:
+            if password == ADMIN_PASSWORD:
                 st.session_state.admin_authenticated = True
                 st.rerun()
-
             else:
                 st.error("كلمة المرور غير صحيحة.")
 
@@ -745,7 +610,6 @@ elif page == "🔐 لوحة المسؤول":
     st.success("تم تسجيل دخول المسؤول بنجاح.")
 
     if st.button("تسجيل الخروج"):
-
         st.session_state.admin_authenticated = False
         st.rerun()
 
@@ -766,17 +630,14 @@ elif page == "🔐 لوحة المسؤول":
         if "qa_notice" in st.session_state:
 
             notice = st.session_state["qa_notice"]
-
             notice_type = st.session_state.get(
                 "qa_notice_type", "success"
             )
 
             if notice_type == "success":
                 st.success(notice)
-
             elif notice_type == "warning":
                 st.warning(notice)
-
             else:
                 st.error(notice)
 
@@ -835,7 +696,7 @@ elif page == "🔐 لوحة المسؤول":
                             )
 
                         except Exception as e:
-                            st.error(f"لم يتم حفظ الملف: {e}")
+                            st.error(f"لم يتم الحفظ: {e}")
 
                     else:
                         st.error(
@@ -844,22 +705,23 @@ elif page == "🔐 لوحة المسؤول":
                         )
 
     # --------------------------------------
-    # إدارة قاعدة المعرفة
+    # إدارة المعرفة
     # --------------------------------------
 
     with tab3:
 
         st.subheader("إدارة قاعدة المعرفة")
 
-        items = get_items()
+        items = get_knowledge_data()
 
         if not items:
-
             st.info("لا توجد بيانات محفوظة حتى الآن.")
 
         else:
 
-            st.write(f"عدد العناصر المحفوظة: {len(items)}")
+            st.write(
+                f"عدد العناصر المحفوظة: {len(items)}"
+            )
 
             for item in items:
 
@@ -889,7 +751,6 @@ elif page == "🔐 لوحة المسؤول":
 
                         try:
                             delete_item(item_id)
-
                             st.success("تم حذف العنصر.")
                             st.rerun()
 
