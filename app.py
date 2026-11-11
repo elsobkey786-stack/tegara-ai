@@ -1,4 +1,3 @@
-
 import os
 import re
 import sqlite3
@@ -279,6 +278,8 @@ def ask_grok(question, context):
 
     except Exception as e:
         error_text = str(e)
+        status_code = getattr(e, "status_code", "غير معروف")
+        error_body = getattr(e, "body", None)
 
         if "401" in error_text:
             return "مفتاح Grok API غير صحيح أو غير مفعل."
@@ -301,16 +302,13 @@ def ask_grok(question, context):
         if "timeout" in error_text.lower():
             return "استغرق الاتصال وقتًا طويلًا. حاول مرة أخرى."
 
-                status_code = getattr(e, "status_code", "غير معروف")
-        error_body = getattr(e, "body", None)
-
         return f"""
 خطأ أثناء الاتصال بـ Grok
 
 كود الخطأ: {status_code}
 
 تفاصيل الخطأ:
-{error_body if error_body else str(e)}
+{error_body if error_body else error_text}
 """
 
 
