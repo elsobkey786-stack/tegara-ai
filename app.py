@@ -249,7 +249,7 @@ def ask_gemini(question, context):
         )
 
         response = client.models.generate_content(
-           gemini-2.5-flash
+           model="gemini-2.5-flash",
             contents=prompt
         )
 
