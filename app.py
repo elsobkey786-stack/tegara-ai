@@ -1,3 +1,4 @@
+
 import os
 import re
 import sqlite3
@@ -28,14 +29,17 @@ st.set_page_config(
     layout="wide"
 )
 
-# قراءة مفاتيح التشغيل
 try:
-    GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+    GEMINI_API_KEY = st.secrets.get(
+        "GEMINI_API_KEY", ""
+    ) or os.getenv("GEMINI_API_KEY", "")
 except Exception:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 try:
-    ADMIN_PASSWORD = st.secrets.get("TEGARA_ADMIN_PASSWORD", "")
+    ADMIN_PASSWORD = st.secrets.get(
+        "TEGARA_ADMIN_PASSWORD", ""
+    ) or os.getenv("TEGARA_ADMIN_PASSWORD", "")
 except Exception:
     ADMIN_PASSWORD = os.getenv("TEGARA_ADMIN_PASSWORD", "")
 
@@ -216,6 +220,49 @@ def retrieve_context(question):
 # 7. الاتصال بـ Gemini AI
 # ==========================================
 
+@st.cache_resource
+def get_gemini_client(api_key):
+    return genai.Client(api_key=api_key)
+
+
+@st.cache_data(ttl=3600)
+def get_available_gemini_model(api_key):
+    client = get_gemini_client(api_key)
+
+    available_models = []
+
+    for model_info in client.models.list():
+        supported_actions = getattr(
+            model_info,
+            "supported_actions",
+            None
+        ) or []
+
+        if "generateContent" in supported_actions:
+            model_name = getattr(model_info, "name", None)
+
+            if model_name:
+                available_models.append(model_name)
+
+    if not available_models:
+        raise RuntimeError(
+            "لم يرجع Google أي موديل يدعم generateContent لهذا المفتاح."
+        )
+
+    # تفضيل موديلات Flash
+    flash_models = [
+        name for name in available_models
+        if "flash" in name.lower()
+        and "image" not in name.lower()
+    ]
+
+    if flash_models:
+        # اختيار أول موديل Flash متاح
+        return flash_models[0]
+
+    return available_models[0]
+
+
 def ask_gemini(question, context):
 
     if not GEMINI_API_KEY:
@@ -244,39 +291,15 @@ def ask_gemini(question, context):
 """
 
     try:
-        client = genai.Client(
-            api_key=GEMINI_API_KEY
+        client = get_gemini_client(GEMINI_API_KEY)
+
+        selected_model = get_available_gemini_model(
+            GEMINI_API_KEY
         )
 
-        # جلب الموديلات المتاحة لمفتاح API
-available_models = []
-
-for m in client.models.list():
-    actions = m.supported_actions or []
-    if "generateContent" in actions:
-        available_models.append(m.name)
-
-if not available_models:
-    return "مفتاح Gemini لم يُرجع أي موديل يدعم توليد النصوص."
-
-# اختيار موديل Flash متاح تلقائيًا
-flash_models = [
-    m for m in available_models
-    if "flash" in m.lower()
-    and "image" not in m.lower()
-]
-
-if flash_models:
-    selected_model = flash_models[0]
-else:
-    selected_model = available_models[0]
-
-response = client.models.generate_content(
-    model=selected_model,
-    contents=prompt
-)
-
-return response.text or "Gemini لم يُرجع إجابة."
+        response = client.models.generate_content(
+            model=selected_model,
+            contents=prompt
         )
 
         answer = response.text
@@ -290,16 +313,22 @@ return response.text or "Gemini لم يُرجع إجابة."
         error_text = str(e)
         status_code = getattr(e, "code", "غير معروف")
 
-        if "API_KEY_INVALID" in error_text or "API key not valid" in error_text:
+        if (
+            "API_KEY_INVALID" in error_text
+            or "API key not valid" in error_text
+        ):
             return "مفتاح Gemini API غير صحيح أو غير مفعل."
 
         if "403" in error_text:
-            return "لا يملك المفتاح صلاحية استخدام Gemini API."
+            return (
+                "مفتاح API لا يملك صلاحية استخدام Gemini. "
+                "راجع إعدادات Google AI Studio."
+            )
 
         if "404" in error_text:
             return (
-                "موديل Gemini غير متاح حاليًا. "
-                "تحقق من اسم الموديل المتاح لحسابك."
+                "لم يتم العثور على موديل Gemini المطلوب. "
+                "تفاصيل الخطأ: " + error_text
             )
 
         if "429" in error_text:
@@ -315,7 +344,7 @@ return response.text or "Gemini لم يُرجع إجابة."
             )
 
         return f"""
-حصل خطأ أثناء الاتصال بـ Gemini
+حصل خطأ أثناء الاتصال بـ Gemini.
 
 كود الخطأ: {status_code}
 
