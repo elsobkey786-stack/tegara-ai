@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import datetime
 
 import streamlit as st
-from openai import OpenAI
+from google import genai
 from pypdf import PdfReader
 from docx import Document
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -28,11 +28,11 @@ st.set_page_config(
     layout="wide"
 )
 
-# قراءة مفاتيح التشغيل من Streamlit Secrets
+# قراءة مفاتيح التشغيل
 try:
-    XAI_API_KEY = st.secrets.get("XAI_API_KEY", "")
+    GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
-    XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 try:
     ADMIN_PASSWORD = st.secrets.get("TEGARA_ADMIN_PASSWORD", "")
@@ -213,15 +213,15 @@ def retrieve_context(question):
 
 
 # ==========================================
-# 7. الاتصال بـ Grok AI
+# 7. الاتصال بـ Gemini AI
 # ==========================================
 
-def ask_grok(question, context):
+def ask_gemini(question, context):
 
-    if not XAI_API_KEY:
+    if not GEMINI_API_KEY:
         return (
-            "مفتاح Grok API غير مضبوط. "
-            "يرجى إضافة XAI_API_KEY في إعدادات Secrets."
+            "مفتاح Gemini API غير مضبوط. "
+            "يرجى إضافة GEMINI_API_KEY في إعدادات Secrets."
         )
 
     prompt = f"""
@@ -244,32 +244,16 @@ def ask_grok(question, context):
 """
 
     try:
-        client = OpenAI(
-            api_key=XAI_API_KEY,
-            base_url="https://api.x.ai/v1",
-            timeout=45.0,
-            max_retries=1
+        client = genai.Client(
+            api_key=GEMINI_API_KEY
         )
 
-        response = client.chat.completions.create(
-            model="grok-4.1-fast",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "أنت Tegara AI، مساعد أكاديمي متخصص "
-                        "في مساعدة طلاب كلية التجارة."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.4
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=prompt
         )
 
-        answer = response.choices[0].message.content
+        answer = response.text
 
         if answer:
             return answer
@@ -278,37 +262,39 @@ def ask_grok(question, context):
 
     except Exception as e:
         error_text = str(e)
-        status_code = getattr(e, "status_code", "غير معروف")
-        error_body = getattr(e, "body", None)
+        status_code = getattr(e, "code", "غير معروف")
 
-        if "401" in error_text:
-            return "مفتاح Grok API غير صحيح أو غير مفعل."
+        if "API_KEY_INVALID" in error_text or "API key not valid" in error_text:
+            return "مفتاح Gemini API غير صحيح أو غير مفعل."
 
         if "403" in error_text:
-            return "حساب Grok API لا يملك صلاحية استخدام هذا الموديل."
+            return "لا يملك المفتاح صلاحية استخدام Gemini API."
 
         if "404" in error_text:
             return (
-                "اسم الموديل غير متاح لحسابك. "
-                "راجع أسماء الموديلات المتاحة في xAI Console."
+                "موديل Gemini غير متاح حاليًا. "
+                "تحقق من اسم الموديل المتاح لحسابك."
             )
 
         if "429" in error_text:
             return (
-                "وصلنا إلى حد الاستخدام أو الطلبات المسموح به. "
+                "وصلت إلى حد الاستخدام المسموح به في Gemini. "
                 "حاول مرة أخرى لاحقًا."
             )
 
-        if "timeout" in error_text.lower():
-            return "استغرق الاتصال وقتًا طويلًا. حاول مرة أخرى."
+        if "503" in error_text:
+            return (
+                "خدمة Gemini مشغولة حاليًا. "
+                "حاول مرة أخرى بعد قليل."
+            )
 
         return f"""
-خطأ أثناء الاتصال بـ Grok
+حصل خطأ أثناء الاتصال بـ Gemini
 
 كود الخطأ: {status_code}
 
 تفاصيل الخطأ:
-{error_body if error_body else error_text}
+{error_text}
 """
 
 
@@ -365,7 +351,6 @@ def save_qa_callback():
     try:
         add_question(question, answer)
 
-        # تفريغ الخانات بعد نجاح الحفظ
         st.session_state["qa_question"] = ""
         st.session_state["qa_answer"] = ""
 
@@ -492,7 +477,7 @@ if page == "💬 المساعد الذكي":
             with st.spinner("جاري تجهيز الإجابة..."):
 
                 context = retrieve_context(question)
-                answer = ask_grok(question, context)
+                answer = ask_gemini(question, context)
 
                 st.markdown(answer)
 
@@ -510,7 +495,6 @@ elif page == "🔐 لوحة المسؤول":
 
     st.header("🔐 لوحة إدارة Tegara AI")
 
-    # منع الدخول إذا لم يتم ضبط كلمة المرور
     if not ADMIN_PASSWORD:
         st.error(
             "لوحة المسؤول غير مفعلة. "
@@ -521,7 +505,6 @@ elif page == "🔐 لوحة المسؤول":
     if "admin_authenticated" not in st.session_state:
         st.session_state.admin_authenticated = False
 
-    # تسجيل الدخول
     if not st.session_state.admin_authenticated:
 
         password = st.text_input(
