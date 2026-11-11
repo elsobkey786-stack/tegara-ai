@@ -217,50 +217,12 @@ def retrieve_context(question):
 
 
 # ==========================================
-# 7. الاتصال بـ Gemini AI
+# 7. الاتصال بـ Gemini باستخدام Interactions API
 # ==========================================
 
 @st.cache_resource
 def get_gemini_client(api_key):
     return genai.Client(api_key=api_key)
-
-
-@st.cache_data(ttl=3600)
-def get_available_gemini_model(api_key):
-    client = get_gemini_client(api_key)
-
-    available_models = []
-
-    for model_info in client.models.list():
-        supported_actions = getattr(
-            model_info,
-            "supported_actions",
-            None
-        ) or []
-
-        if "generateContent" in supported_actions:
-            model_name = getattr(model_info, "name", None)
-
-            if model_name:
-                available_models.append(model_name)
-
-    if not available_models:
-        raise RuntimeError(
-            "لم يرجع Google أي موديل يدعم generateContent لهذا المفتاح."
-        )
-
-    # تفضيل موديلات Flash
-    flash_models = [
-        name for name in available_models
-        if "flash" in name.lower()
-        and "image" not in name.lower()
-    ]
-
-    if flash_models:
-        # اختيار أول موديل Flash متاح
-        return flash_models[0]
-
-    return available_models[0]
 
 
 def ask_gemini(question, context):
@@ -282,6 +244,7 @@ def ask_gemini(question, context):
 5. لا تخترع معلومات أو تنسب معلومة للمصادر دون دليل.
 6. إذا لم تجد الإجابة في المعلومات المتاحة، وضح ذلك للطالب.
 7. ساعد الطالب على فهم المواد والمفاهيم الدراسية.
+8. إذا كانت المعلومات الموجودة في قاعدة المعرفة غير كافية، وضح ذلك ولا تدّعِ أن الإجابة مؤكدة من مصادر الكلية.
 
 المعلومات المتاحة من قاعدة المعرفة:
 {context if context else "لا توجد معلومات مرتبطة بالسؤال في قاعدة المعرفة."}
@@ -293,21 +256,17 @@ def ask_gemini(question, context):
     try:
         client = get_gemini_client(GEMINI_API_KEY)
 
-        selected_model = get_available_gemini_model(
-            GEMINI_API_KEY
+        interaction = client.interactions.create(
+            model="gemini-3.8-flash",
+            input=prompt
         )
 
-        response = client.models.generate_content(
-            model=selected_model,
-            contents=prompt
-        )
-
-        answer = response.text
+        answer = interaction.output_text
 
         if answer:
             return answer
 
-        return "لم أتمكن من تكوين إجابة. حاول مرة أخرى."
+        return "لم يتمكن Gemini من تكوين إجابة. حاول مرة أخرى."
 
     except Exception as e:
         error_text = str(e)
@@ -327,8 +286,8 @@ def ask_gemini(question, context):
 
         if "404" in error_text:
             return (
-                "لم يتم العثور على موديل Gemini المطلوب. "
-                "تفاصيل الخطأ: " + error_text
+                "موديل Gemini غير متاح لهذا المفتاح أو لم يتم العثور عليه.\n\n"
+                f"تفاصيل الخطأ: {error_text}"
             )
 
         if "429" in error_text:
@@ -344,7 +303,7 @@ def ask_gemini(question, context):
             )
 
         return f"""
-حصل خطأ أثناء الاتصال بـ Gemini.
+حدث خطأ أثناء الاتصال بـ Gemini.
 
 كود الخطأ: {status_code}
 
